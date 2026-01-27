@@ -36,8 +36,11 @@ init_db()
 def create_invoice(amount, user_id):
     headers = {'Crypto-Pay-API-Token': CRYPTO_PAY_TOKEN}
     payload = {'asset': 'USDT', 'amount': str(amount), 'payload': str(user_id)}
-    response = requests.post("https://pay.crypt.bot/api/createInvoice", json=payload, headers=headers)
-    return response.json()['result']
+    try:
+        response = requests.post("https://pay.crypt.bot/api/createInvoice", json=payload, headers=headers)
+        return response.json()['result']
+    except:
+        return None
 
 # --- Subscription Check ---
 def is_subscribed(chat_id):
@@ -47,7 +50,7 @@ def is_subscribed(chat_id):
     except:
         return False
 
-# --- Profile Creation (Strictly Photos Only) ---
+# --- Profile Creation ---
 @bot.message_handler(func=lambda m: m.text in ["📝 Edit Profile", "Create Profile"])
 def create_profile(message):
     bot.send_message(message.chat.id, "What is your Name?")
@@ -85,14 +88,11 @@ def process_photo_final(message, name, gender, age, location):
         conn.close()
         bot.send_message(message.chat.id, "✅ Profile Created Successfully!")
         show_main_menu(message)
-    elif message.content_type in ['video', 'animation', 'sticker']:
-        bot.send_message(message.chat.id, "🚫 Only photos allowed! Video/GIF/Sticker blocked. Send a photo:")
-        bot.register_next_step_handler(message, process_photo_final, name, gender, age, location)
     else:
-        bot.send_message(message.chat.id, "Please upload a photo.")
+        bot.send_message(message.chat.id, "🚫 Only photos allowed! Please upload a photo:")
         bot.register_next_step_handler(message, process_photo_final, name, gender, age, location)
 
-# --- Matching Logic with Reactions ---
+# --- Matching Logic ---
 @bot.message_handler(func=lambda m: m.text in ["🔍 Find Matches", "🎲 Random Match"])
 def handle_matching(message):
     user_id = message.chat.id
@@ -102,27 +102,26 @@ def handle_matching(message):
 
     conn = sqlite3.connect('dating_bot.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT is_premium FROM users WHERE id = ?", (user_id,))
+    cursor.execute("SELECT is_premium, gender FROM users WHERE id = ?", (user_id,))
     res = cursor.fetchone()
-    is_premium = res[0] if res else 0
     
+    if not res:
+        bot.send_message(user_id, "Please create a profile first!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add("Create Profile"))
+        return
+
+    is_premium, me_gender = res
+    
+    # Premium Limit Check
     if not is_premium:
         now = time.time()
         if user_id not in user_search_data:
             user_search_data[user_id] = {'count': 0, 'last_reset': now}
-        data = user_search_data[user_id]
-        if data['count'] >= 10:
+        if user_search_data[user_id]['count'] >= 10:
             bot.send_message(user_id, "🚫 Free limit reached! Upgrade to 🌟 Premium for unlimited matches.")
             return
-        data['count'] += 1
+        user_search_data[user_id]['count'] += 1
 
-    cursor.execute("SELECT gender FROM users WHERE id = ?", (user_id,))
-    me = cursor.fetchone()
-    if not me:
-        bot.send_message(user_id, "Please create a profile first!")
-        return
-    
-    target = "Female" if me[0] == "Male" else "Male"
+    target = "Female" if me_gender == "Male" else "Male"
     cursor.execute("SELECT * FROM users WHERE id != ? AND gender = ?", (user_id, target))
     rows = cursor.fetchall()
     conn.close()
@@ -151,27 +150,32 @@ def handle_reactions(call):
         bot.send_message(target_id, f"🌟 Someone sent you a {emoji}!")
     except: pass
 
-# --- Premium Menu ---
-@bot.message_handler(func=lambda m: m.text == "🌟 Buy Premium")
-def premium_plans(message):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("Weekly - $2", callback_data="buy_2"))
-    markup.add(types.InlineKeyboardButton("Monthly - $7", callback_data="buy_7"))
-    markup.add(types.InlineKeyboardButton("Yearly - $200", callback_data="buy_200"))
-    bot.send_message(message.chat.id, "💎 Upgrade for Unlimited Matches!", reply_markup=markup)
+@bot.message_handler(func=lambda m: m.text == "👤 My Profile")
+def view_profile(message):
+    conn = sqlite3.connect('dating_bot.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (message.chat.id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        bot.send_photo(message.chat.id, row[5], caption=f"👤 **Your Profile**\n\nName: {row[1]}\nAge: {row[3]}\nLoc: {row[4]}\nPremium: {'Yes' if row[7] else 'No'}", parse_mode="Markdown")
+    else:
+        bot.send_message(message.chat.id, "No profile found.")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
-def process_buy(call):
-    amount = call.data.split("_")[1]
-    invoice = create_invoice(amount, call.message.chat.id)
-    markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Pay via CryptoBot", url=invoice['pay_url']))
-    bot.send_message(call.message.chat.id, f"✅ Pay ${amount} to unlock Unlimited Access:", reply_markup=markup)
+@bot.message_handler(func=lambda m: m.text == "📊 Stats")
+def show_stats(message):
+    conn = sqlite3.connect('dating_bot.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
+    conn.close()
+    bot.reply_to(message, f"📊 Total Users: {count}")
 
 def show_main_menu(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("🔍 Find Matches", "🎲 Random Match")
     markup.add("👤 My Profile", "🌟 Buy Premium")
-    markup.add("🛠 Support")
+    markup.add("📊 Stats", "🛠 Support")
     bot.send_message(message.chat.id, "🌟 Main Menu:", reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
@@ -192,5 +196,5 @@ def check_sub(call):
     else:
         bot.answer_callback_query(call.id, "❌ Join the channel first!", show_alert=True)
 
-print("Bot is LIVE...")
+print("Dating Bot is LIVE...")
 bot.infinity_polling()
