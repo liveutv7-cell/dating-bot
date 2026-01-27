@@ -5,10 +5,13 @@ import random
 import time
 import os
 import requests
+import threading
 
 # --- Configuration (Railway Variables) ---
-API_TOKEN = os.getenv('BOT_TOKEN')
-CRYPTO_PAY_TOKEN = os.getenv('CRYPTO_PAY_TOKEN')
+# .strip() and .replace() ensure the token is clean even if Railway adds quotes
+API_TOKEN = os.getenv('BOT_TOKEN', '').replace('"', '').strip()
+CRYPTO_PAY_TOKEN = os.getenv('CRYPTO_PAY_TOKEN', '').replace('"', '').strip()
+
 CHANNEL_ID = '@Globalhotgirls_Advertisements'
 CHANNEL_LINK = 'https://t.me/Globalhotgirls_Advertisements'
 SUPPORT_USER = "@Eva_x33"
@@ -32,7 +35,39 @@ def init_db():
 
 init_db()
 
-# --- CryptoPay Integration ---
+# --- Automatic Payment Checker (THE MISSING PIECE) ---
+def check_payments():
+    """Background task to check for paid invoices every 30 seconds"""
+    while True:
+        try:
+            headers = {'Crypto-Pay-API-Token': CRYPTO_PAY_TOKEN}
+            # Fetch only paid invoices
+            response = requests.get("https://pay.crypt.bot/api/getInvoices?status=paid", headers=headers)
+            res_data = response.json()
+            
+            if res_data.get('ok'):
+                items = res_data['result'].get('items', [])
+                for inv in items:
+                    user_id = int(inv['payload'])
+                    
+                    # Update user to Premium in database
+                    conn = sqlite3.connect('dating_bot.db')
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE users SET is_premium = 1 WHERE id = ?", (user_id,))
+                    conn.commit()
+                    conn.close()
+                    
+                    # Notify the user
+                    try:
+                        bot.send_message(user_id, "🌟 PAYMENT CONFIRMED! Your account has been upgraded to PREMIUM. Enjoy unlimited matches!")
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Payment loop error: {e}")
+        
+        time.sleep(30) # Check every 30 seconds
+
+# --- CryptoPay Logic ---
 def create_invoice(amount, user_id):
     headers = {'Crypto-Pay-API-Token': CRYPTO_PAY_TOKEN}
     payload = {'asset': 'USDT', 'amount': str(amount), 'payload': str(user_id)}
@@ -75,7 +110,7 @@ def process_age(message, name, gender):
 
 def process_location(message, name, gender, age):
     location = message.text
-    bot.send_message(message.chat.id, "Send your Profile Photo (Videos/GIFs not allowed):")
+    bot.send_message(message.chat.id, "Send your Profile Photo:")
     bot.register_next_step_handler(message, process_photo_final, name, gender, age, location)
 
 def process_photo_final(message, name, gender, age, location):
@@ -90,7 +125,7 @@ def process_photo_final(message, name, gender, age, location):
         bot.send_message(message.chat.id, "✅ Profile Created Successfully!")
         show_main_menu(message)
     else:
-        bot.send_message(message.chat.id, "🚫 Only photos allowed! Please upload a photo:")
+        bot.send_message(message.chat.id, "🚫 Only photos allowed! Try again:")
         bot.register_next_step_handler(message, process_photo_final, name, gender, age, location)
 
 # --- Matching Logic ---
@@ -139,7 +174,7 @@ def handle_matching(message):
     else:
         bot.send_message(user_id, "No users found. Try again later!")
 
-# --- Premium & Support Handlers (አዲስ የተጨመሩ) ---
+# --- Premium & Support Handlers ---
 @bot.message_handler(func=lambda m: m.text == "🌟 Buy Premium")
 def premium_plans(message):
     markup = types.InlineKeyboardMarkup()
@@ -219,5 +254,11 @@ def check_sub(call):
     else:
         bot.answer_callback_query(call.id, "❌ Join the channel first!", show_alert=True)
 
+# --- START BOT ---
 print("Dating Bot is LIVE...")
+
+# Start the background payment checker thread
+threading.Thread(target=check_payments, daemon=True).start()
+
+# Start polling
 bot.infinity_polling()
