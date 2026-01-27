@@ -39,7 +39,8 @@ def create_invoice(amount, user_id):
     try:
         response = requests.post("https://pay.crypt.bot/api/createInvoice", json=payload, headers=headers)
         return response.json()['result']
-    except:
+    except Exception as e:
+        print(f"Error creating invoice: {e}")
         return None
 
 # --- Subscription Check ---
@@ -111,7 +112,6 @@ def handle_matching(message):
 
     is_premium, me_gender = res
     
-    # Premium Limit Check
     if not is_premium:
         now = time.time()
         if user_id not in user_search_data:
@@ -139,7 +139,30 @@ def handle_matching(message):
     else:
         bot.send_message(user_id, "No users found. Try again later!")
 
-# --- Reaction Handler ---
+# --- Premium & Support Handlers (አዲስ የተጨመሩ) ---
+@bot.message_handler(func=lambda m: m.text == "🌟 Buy Premium")
+def premium_plans(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Weekly - $2", callback_data="buy_2"))
+    markup.add(types.InlineKeyboardButton("Monthly - $7", callback_data="buy_7"))
+    markup.add(types.InlineKeyboardButton("Yearly - $200", callback_data="buy_200"))
+    bot.send_message(message.chat.id, "💎 Upgrade for Unlimited Matches!", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "🛠 Support")
+def support_info(message):
+    bot.send_message(message.chat.id, f"Need help? Contact Admin: {SUPPORT_USER}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
+def process_buy(call):
+    amount = call.data.split("_")[1]
+    invoice = create_invoice(amount, call.message.chat.id)
+    if invoice:
+        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Pay via CryptoBot", url=invoice['pay_url']))
+        bot.send_message(call.message.chat.id, f"✅ Pay ${amount} to unlock Unlimited Access:", reply_markup=markup)
+    else:
+        bot.answer_callback_query(call.id, "❌ Error creating invoice. Check API Token.")
+
+# --- General Handlers ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("react_"))
 def handle_reactions(call):
     data = call.data.split("_")
