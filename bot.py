@@ -1,16 +1,22 @@
 import telebot
 from telebot import types
-import sqlite3
+from pymongo import MongoClient
 import random
 import time
 import os
 import requests
 import threading
 
-# --- Configuration (Railway Variables) ---
-# .strip() and .replace() ensure the token is clean even if Railway adds quotes
-API_TOKEN = os.getenv('BOT_TOKEN', '').replace('"', '').strip()
-CRYPTO_PAY_TOKEN = os.getenv('CRYPTO_PAY_TOKEN', '').replace('"', '').strip()
+# --- Configuration ---
+# Your provided tokens are now integrated
+API_TOKEN = "8239904642:AAHy0xYu2ogMubj8kuWGtnG8_p5Y9V4eM_w"
+CRYPTO_PAY_TOKEN = "522389:AAagZEOufX4vVfpNm1ArS506FqHI9DU8aom"
+
+# MongoDB Connection String
+MONGO_URI = "mongodb+srv://admin:Mrpro123@cluster0.vyqetel.mongodb.net/?appName=Cluster0"
+client = MongoClient(MONGO_URI)
+db = client['dating_bot_db']
+users_col = db['users']
 
 CHANNEL_ID = '@Globalhotgirls_Advertisements'
 CHANNEL_LINK = 'https://t.me/Globalhotgirls_Advertisements'
@@ -20,28 +26,11 @@ ADMIN_ID = 8590099043
 bot = telebot.TeleBot(API_TOKEN)
 user_search_data = {} 
 
-# --- Database Initialization ---
-def init_db():
-    conn = sqlite3.connect('dating_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users 
-                      (id INTEGER PRIMARY KEY, name TEXT, gender TEXT, age TEXT, 
-                       location TEXT, photo TEXT, verified INTEGER DEFAULT 0, 
-                       is_premium INTEGER DEFAULT 0)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS likes 
-                      (from_id INTEGER, to_id INTEGER, type TEXT)''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# --- Automatic Payment Checker (THE MISSING PIECE) ---
+# --- Automatic Payment Checker ---
 def check_payments():
-    """Background task to check for paid invoices every 30 seconds"""
     while True:
         try:
             headers = {'Crypto-Pay-API-Token': CRYPTO_PAY_TOKEN}
-            # Fetch only paid invoices
             response = requests.get("https://pay.crypt.bot/api/getInvoices?status=paid", headers=headers)
             res_data = response.json()
             
@@ -49,23 +38,14 @@ def check_payments():
                 items = res_data['result'].get('items', [])
                 for inv in items:
                     user_id = int(inv['payload'])
-                    
-                    # Update user to Premium in database
-                    conn = sqlite3.connect('dating_bot.db')
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE users SET is_premium = 1 WHERE id = ?", (user_id,))
-                    conn.commit()
-                    conn.close()
-                    
-                    # Notify the user
+                    # Update to Premium in MongoDB
+                    users_col.update_one({"id": user_id}, {"$set": {"is_premium": 1}})
                     try:
-                        bot.send_message(user_id, "🌟 PAYMENT CONFIRMED! Your account has been upgraded to PREMIUM. Enjoy unlimited matches!")
-                    except:
-                        pass
+                        bot.send_message(user_id, "🌟 PAYMENT CONFIRMED! Your account is now PREMIUM!")
+                    except: pass
         except Exception as e:
-            print(f"Payment loop error: {e}")
-        
-        time.sleep(30) # Check every 30 seconds
+            print(f"Payment error: {e}")
+        time.sleep(30)
 
 # --- CryptoPay Logic ---
 def create_invoice(amount, user_id):
@@ -74,19 +54,16 @@ def create_invoice(amount, user_id):
     try:
         response = requests.post("https://pay.crypt.bot/api/createInvoice", json=payload, headers=headers)
         return response.json()['result']
-    except Exception as e:
-        print(f"Error creating invoice: {e}")
-        return None
+    except: return None
 
 # --- Subscription Check ---
 def is_subscribed(chat_id):
     try:
         status = bot.get_chat_member(CHANNEL_ID, chat_id).status
         return status in ['member', 'administrator', 'creator']
-    except:
-        return False
+    except: return False
 
-# --- Profile Creation ---
+# --- Profile Management ---
 @bot.message_handler(func=lambda m: m.text in ["📝 Edit Profile", "Create Profile"])
 def create_profile(message):
     bot.send_message(message.chat.id, "What is your Name?")
@@ -116,16 +93,15 @@ def process_location(message, name, gender, age):
 def process_photo_final(message, name, gender, age, location):
     if message.content_type == 'photo':
         photo_id = message.photo[-1].file_id
-        conn = sqlite3.connect('dating_bot.db')
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO users (id, name, gender, age, location, photo) VALUES (?, ?, ?, ?, ?, ?)", 
-                       (message.chat.id, name, gender, age, location, photo_id))
-        conn.commit()
-        conn.close()
-        bot.send_message(message.chat.id, "✅ Profile Created Successfully!")
+        users_col.update_one(
+            {"id": message.chat.id},
+            {"$set": {"id": message.chat.id, "name": name, "gender": gender, "age": age, "location": location, "photo": photo_id, "is_premium": 0}},
+            upsert=True
+        )
+        bot.send_message(message.chat.id, "✅ Profile Created/Updated Successfully!")
         show_main_menu(message)
     else:
-        bot.send_message(message.chat.id, "🚫 Only photos allowed! Try again:")
+        bot.send_message(message.chat.id, "🚫 Send a photo!")
         bot.register_next_step_handler(message, process_photo_final, name, gender, age, location)
 
 # --- Matching Logic ---
@@ -136,16 +112,13 @@ def handle_matching(message):
         start(message)
         return
 
-    conn = sqlite3.connect('dating_bot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_premium, gender FROM users WHERE id = ?", (user_id,))
-    res = cursor.fetchone()
-    
-    if not res:
+    user_data = users_col.find_one({"id": user_id})
+    if not user_data:
         bot.send_message(user_id, "Please create a profile first!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add("Create Profile"))
         return
 
-    is_premium, me_gender = res
+    is_premium = user_data.get('is_premium', 0)
+    me_gender = user_data.get('gender')
     
     if not is_premium:
         now = time.time()
@@ -157,35 +130,28 @@ def handle_matching(message):
         user_search_data[user_id]['count'] += 1
 
     target = "Female" if me_gender == "Male" else "Male"
-    cursor.execute("SELECT * FROM users WHERE id != ? AND gender = ?", (user_id, target))
-    rows = cursor.fetchall()
-    conn.close()
+    matches = list(users_col.find({"id": {"$ne": user_id}, "gender": target}))
     
-    if rows:
-        row = random.choice(rows)
+    if matches:
+        row = random.choice(matches)
         markup = types.InlineKeyboardMarkup(row_width=3)
         markup.add(
-            types.InlineKeyboardButton("❤️", callback_data=f"react_like_{row[0]}"),
-            types.InlineKeyboardButton("👍", callback_data=f"react_thumb_{row[0]}"),
-            types.InlineKeyboardButton("😍", callback_data=f"react_fire_{row[0]}")
+            types.InlineKeyboardButton("❤️", callback_data=f"react_like_{row['id']}"),
+            types.InlineKeyboardButton("👍", callback_data=f"react_thumb_{row['id']}"),
+            types.InlineKeyboardButton("😍", callback_data=f"react_fire_{row['id']}")
         )
-        markup.add(types.InlineKeyboardButton("💬 Send Message", url=f"tg://user?id={row[0]}"))
-        bot.send_photo(user_id, row[5], caption=f"Name: {row[1]}\nAge: {row[3]}\nLoc: {row[4]}", reply_markup=markup)
+        markup.add(types.InlineKeyboardButton("💬 Send Message", url=f"tg://user?id={row['id']}"))
+        bot.send_photo(user_id, row['photo'], caption=f"Name: {row['name']}\nAge: {row['age']}\nLoc: {row['location']}", reply_markup=markup)
     else:
         bot.send_message(user_id, "No users found. Try again later!")
 
-# --- Premium & Support Handlers ---
+# --- Premium & Support ---
 @bot.message_handler(func=lambda m: m.text == "🌟 Buy Premium")
 def premium_plans(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("Weekly - $2", callback_data="buy_2"))
     markup.add(types.InlineKeyboardButton("Monthly - $7", callback_data="buy_7"))
-    markup.add(types.InlineKeyboardButton("Yearly - $200", callback_data="buy_200"))
     bot.send_message(message.chat.id, "💎 Upgrade for Unlimited Matches!", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == "🛠 Support")
-def support_info(message):
-    bot.send_message(message.chat.id, f"Need help? Contact Admin: {SUPPORT_USER}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
 def process_buy(call):
@@ -195,39 +161,16 @@ def process_buy(call):
         markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Pay via CryptoBot", url=invoice['pay_url']))
         bot.send_message(call.message.chat.id, f"✅ Pay ${amount} to unlock Unlimited Access:", reply_markup=markup)
     else:
-        bot.answer_callback_query(call.id, "❌ Error creating invoice. Check API Token.")
-
-# --- General Handlers ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith("react_"))
-def handle_reactions(call):
-    data = call.data.split("_")
-    react_type, target_id = data[1], int(data[2])
-    bot.answer_callback_query(call.id, "Reaction sent! ✨")
-    try:
-        emoji = "❤️" if react_type == "like" else "👍" if react_type == "thumb" else "😍"
-        bot.send_message(target_id, f"🌟 Someone sent you a {emoji}!")
-    except: pass
-
-@bot.message_handler(func=lambda m: m.text == "👤 My Profile")
-def view_profile(message):
-    conn = sqlite3.connect('dating_bot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE id = ?", (message.chat.id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        bot.send_photo(message.chat.id, row[5], caption=f"👤 **Your Profile**\n\nName: {row[1]}\nAge: {row[3]}\nLoc: {row[4]}\nPremium: {'Yes' if row[7] else 'No'}", parse_mode="Markdown")
-    else:
-        bot.send_message(message.chat.id, "No profile found.")
+        bot.answer_callback_query(call.id, "❌ Error creating invoice.")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Stats")
 def show_stats(message):
-    conn = sqlite3.connect('dating_bot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    count = cursor.fetchone()[0]
-    conn.close()
-    bot.reply_to(message, f"📊 Total Users: {count}")
+    count = users_col.count_documents({})
+    bot.reply_to(message, f"📊 Total Active Users: {count}")
+
+@bot.message_handler(func=lambda m: m.text == "🛠 Support")
+def support_info(message):
+    bot.send_message(message.chat.id, f"Need help? Contact Admin: {SUPPORT_USER}")
 
 def show_main_menu(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -255,10 +198,6 @@ def check_sub(call):
         bot.answer_callback_query(call.id, "❌ Join the channel first!", show_alert=True)
 
 # --- START BOT ---
-print("Dating Bot is LIVE...")
-
-# Start the background payment checker thread
+print("Dating Bot is LIVE with MongoDB...")
 threading.Thread(target=check_payments, daemon=True).start()
-
-# Start polling
 bot.infinity_polling()
