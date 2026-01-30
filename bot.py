@@ -1,9 +1,12 @@
 import telebot
 from telebot import types
 from pymongo import MongoClient
+from datetime import datetime, timedelta
+import requests
 
 # --- CONFIGURATION ---
 API_TOKEN = "8239904642:AAHy0xYu2ogMubj8kuWGtnG8_p5Y9V4eM_w"
+CRYPTO_TOKEN = "522389:AAagZEOufX4vVfpNm1ArS506FqHI9DU8aom" # Your Token added
 MONGO_URI = "mongodb+srv://admin:Mrpro123@cluster0.vyqetel.mongodb.net/?appName=Cluster0"
 CHANNEL_USERNAME = "@GlobalHotgirls_Advertisements" 
 ADMIN_ID = 8593628479 
@@ -13,7 +16,7 @@ db = client['dating_bot_db']
 users_col = db['users']
 bot = telebot.TeleBot(API_TOKEN)
 
-# --- JOIN FORCE CHECK ---
+# --- 1. SUBSCRIPTION CHECK ---
 def is_subscribed(user_id):
     try:
         status = bot.get_chat_member(CHANNEL_USERNAME, user_id).status
@@ -21,68 +24,104 @@ def is_subscribed(user_id):
     except:
         return True
 
-# --- BLOCK NON-PHOTO MESSAGES DURING REGISTRATION ---
-# This part ensures users only upload photos for their profile
-@bot.message_handler(content_types=['video', 'document', 'sticker', 'animation', 'video_note', 'voice'])
-def block_others(message):
-    bot.reply_to(message, "🚫 Error: Only Photos are allowed! Videos, Stickers, and GIFs are not permitted.")
+# --- 2. PREMIUM STATUS & EXPIRY CHECK ---
+def get_status(user_id):
+    if user_id == ADMIN_ID:
+        return True
+    user = users_col.find_one({"id": user_id})
+    if user and user.get('is_premium', 0) == 1:
+        expiry = user.get('expiry_date')
+        if expiry and datetime.now() > expiry:
+            users_col.update_one({"id": user_id}, {"$set": {"is_premium": 0, "search_count": 0}})
+            bot.send_message(user_id, "⚠️ Your Premium has expired. Please renew to continue!")
+            return False
+        return True
+    return False
 
-# --- FIND MATCHES LOGIC ---
-@bot.message_handler(func=lambda m: m.text == "🔍 Find Matches")
-def find_matches(message):
-    if not is_subscribed(message.chat.id):
-        return start(message)
+# --- 3. SECURITY: ONLY PHOTOS ALLOWED ---
+@bot.message_handler(content_types=['video', 'sticker', 'animation', 'document', 'voice'])
+def block_media(message):
+    bot.reply_to(message, "🚫 Access Denied: Only Photos are allowed for profile creation!")
 
-    user = users_col.find_one({"id": message.chat.id})
-    if not user:
-        bot.send_message(message.chat.id, "Please register first by sending /start")
-        return
-
-    is_premium = (message.chat.id == ADMIN_ID or user.get('is_premium', 0) == 1)
-    search_count = user.get('search_count', 0)
-
-    if not is_premium and search_count >= 10:
-        bot.send_message(message.chat.id, "🚫 Daily limit reached (10/10). Upgrade to Premium for unlimited searches!")
-        return
-
-    match = list(users_col.aggregate([{"$match": {"id": {"$ne": message.chat.id}}}, {"$sample": {"size": 1}}]))
-
-    if match:
-        target = match[0]
-        if not is_premium:
-            users_col.update_one({"id": message.chat.id}, {"$inc": {"search_count": 1}})
-
-        caption = f"👤 Name: {target['name']}\n🎂 Age: {target['age']}\n📍 Location: {target.get('location', 'N/A')}"
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("😍", callback_data=f"like_{target['id']}"),
-            types.InlineKeyboardButton("❤️", callback_data=f"like_{target['id']}"),
-            types.InlineKeyboardButton("👍", callback_data=f"like_{target['id']}")
-        )
-        markup.add(types.InlineKeyboardButton("➡️ Next", callback_data="next_match"))
-
-        bot.send_photo(message.chat.id, target['photo'], caption=caption, reply_markup=markup)
-    else:
-        bot.send_message(message.chat.id, "No more matches found!")
-
-# --- START & MENU ---
+# --- 4. START & MENU ---
 @bot.message_handler(commands=['start'])
 def start(message):
     if not is_subscribed(message.chat.id):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("Join Channel", url="https://t.me/GlobalHotgirls_Advertisements"))
-        bot.send_message(message.chat.id, "❗ Join our channel to use the bot:", reply_markup=markup)
+        bot.send_message(message.chat.id, "❗ Join our channel first to use the bot:", reply_markup=markup)
         return
     
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🔍 Find Matches", "👤 My Profile")
-    markup.add("🌟 Buy Premium", "📊 Stats", "🎧 Support")
-    bot.send_message(message.chat.id, "Welcome to Global Dating! Choose an option:", reply_markup=markup)
+    menu = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    menu.add("🔍 Find Matches", "👤 My Profile")
+    menu.add("🌟 Buy Premium", "📊 Stats", "🎧 Support")
+    bot.send_message(message.chat.id, "Welcome to Global Dating! ❤️", reply_markup=menu)
 
-# Other handlers (Support, Profile, etc.) remain the same...
+# --- 5. SEARCH WITH LIMIT ---
+@bot.message_handler(func=lambda m: m.text == "🔍 Find Matches")
+def find_matches(message):
+    is_prem = get_status(message.chat.id)
+    user = users_col.find_one({"id": message.chat.id})
+    
+    if not is_prem and user and user.get('search_count', 0) >= 10:
+        bot.send_message(message.chat.id, "🚫 Limit Reached (10/10). Upgrade to Premium for unlimited access!")
+        return
+
+    match = list(users_col.aggregate([{"$match": {"id": {"$ne": message.chat.id}}}, {"$sample": {"size": 1}}]))
+    if match:
+        target = match[0]
+        if not is_prem:
+            users_col.update_one({"id": message.chat.id}, {"$inc": {"search_count": 1}})
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.row(types.InlineKeyboardButton("😍", callback_data="l"), types.InlineKeyboardButton("❤️", callback_data="l"), types.InlineKeyboardButton("👍", callback_data="l"))
+        markup.add(types.InlineKeyboardButton("➡️ Next Match", callback_data="next"))
+        bot.send_photo(message.chat.id, target['photo'], caption=f"Name: {target['name']}\nAge: {target['age']}", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, "No matches found!")
+
+# --- 6. AUTOMATED PAYMENT SYSTEM ---
+@bot.message_handler(func=lambda m: m.text == "🌟 Buy Premium")
+def pay_menu(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Weekly - $10", callback_data="buy_7"),
+               types.InlineKeyboardButton("Monthly - $30", callback_data="buy_30"))
+    markup.add(types.InlineKeyboardButton("Yearly - $200", callback_data="buy_365"))
+    bot.send_message(message.chat.id, "💎 Select your Premium Plan:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
+def create_invoice(call):
+    days = int(call.data.split("_")[1])
+    price = 10 if days == 7 else (30 if days == 30 else 200)
+    
+    # Create Invoice via CryptoBot API
+    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
+    payload = {"asset": "USDT", "amount": str(price), "description": f"Premium {days} days"}
+    res = requests.post("https://pay.crypt.bot/api/createInvoice", json=payload, headers=headers).json()
+    
+    if res['ok']:
+        pay_url = res['result']['pay_url']
+        invoice_id = res['result']['invoice_id']
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("💳 Pay Now", url=pay_url))
+        markup.add(types.InlineKeyboardButton("✅ Verify Payment", callback_data=f"check_{invoice_id}_{days}"))
+        bot.send_message(call.message.chat.id, f"Plan: {days} Days\nPrice: ${price}\nPay and click Verify:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("check_"))
+def verify(call):
+    _, inv_id, days = call.data.split("_")
+    headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
+    res = requests.get(f"https://pay.crypt.bot/api/getInvoices?invoice_ids={inv_id}", headers=headers).json()
+    
+    if res['ok'] and res['result']['items'][0]['status'] == 'paid':
+        expiry = datetime.now() + timedelta(days=int(days))
+        users_col.update_one({"id": call.message.chat.id}, {"$set": {"is_premium": 1, "expiry_date": expiry, "search_count": 0}})
+        bot.send_message(call.message.chat.id, f"🎉 Success! Premium active until {expiry.strftime('%Y-%m-%d')}.")
+    else:
+        bot.answer_callback_query(call.id, "❌ Payment not detected yet.")
+
 @bot.message_handler(func=lambda m: m.text == "🎧 Support")
 def support(message):
-    bot.send_message(message.chat.id, "📩 Support: @Omar_soner")
+    bot.send_message(message.chat.id, "📩 Admin: @Omar_soner")
 
 bot.infinity_polling()
