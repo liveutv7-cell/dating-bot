@@ -3,7 +3,6 @@ from telebot import types
 from pymongo import MongoClient
 import random
 import time
-import os
 import requests
 import threading
 
@@ -11,21 +10,22 @@ import threading
 API_TOKEN = "8239904642:AAHy0xYu2ogMubj8kuWGtnG8_p5Y9V4eM_w"
 CRYPTO_PAY_TOKEN = "522389:AAagZEOufX4vVfpNm1ArS506FqHI9DU8aom"
 
-# MongoDB Connection
+# MONGO_URI with your confirmed password
 MONGO_URI = "mongodb+srv://admin:Mrpro123@cluster0.vyqetel.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
+# Note: Ensure 'dating_bot_db' is where your 66 users are stored. 
+# If they are in another database, change this name.
 db = client['dating_bot_db'] 
 users_col = db['users']
 
 CHANNEL_ID = '@Globalhotgirls_Advertisements'
 CHANNEL_LINK = 'https://t.me/Globalhotgirls_Advertisements'
 SUPPORT_USER = "@Eva_x33"
-ADMIN_ID = 8590099043 
 
 bot = telebot.TeleBot(API_TOKEN)
 user_search_data = {}
 
-# --- Automatic Payment Checker ---
+# --- Payment Checker ---
 def check_payments():
     while True:
         try:
@@ -33,13 +33,13 @@ def check_payments():
             response = requests.get("https://pay.crypt.bot/api/getInvoices?status=paid", headers=headers)
             res_data = response.json()
             if res_data.get('ok'):
-                items = res_data['result'].get('items', [])
-                for inv in items:
+                for inv in res_data['result'].get('items', []):
                     user_id = int(inv['payload'])
                     users_col.update_one({"id": user_id}, {"$set": {"is_premium": 1}})
-                    try: bot.send_message(user_id, "🌟 PAYMENT CONFIRMED! Your account is now PREMIUM!")
+                    try: 
+                        bot.send_message(user_id, "🌟 PAYMENT CONFIRMED! Your account is now PREMIUM (Unlimited Access)!")
                     except: pass
-        except Exception as e: print(f"Payment error: {e}")
+        except: pass
         time.sleep(30)
 
 def create_invoice(amount, user_id):
@@ -50,134 +50,124 @@ def create_invoice(amount, user_id):
         return response.json()['result']
     except: return None
 
-def is_subscribed(chat_id):
-    try:
-        status = bot.get_chat_member(CHANNEL_ID, chat_id).status
-        return status in ['member', 'administrator', 'creator']
-    except: return False
-
-# --- Profile Management ---
-@bot.message_handler(func=lambda m: m.text in ["📝 Edit Profile", "Create Profile", "👤 My Profile"])
+# --- Profile Section ---
+@bot.message_handler(func=lambda m: m.text in ["👤 My Profile", "Create Profile"])
 def profile_options(message):
     user = users_col.find_one({"id": message.chat.id})
     if user:
-        msg = f"👤 *Your Profile*\n\nName: {user['name']}\nAge: {user['age']}\nGender: {user['gender']}\nLocation: {user['location']}\nPremium: {'Yes 🌟' if user.get('is_premium', 0) else 'No'}"
+        msg = f"👤 *Your Profile*\n\nName: {user['name']}\nAge: {user['age']}\nGender: {user['gender']}\nPremium: {'Yes 🌟' if user.get('is_premium', 0) else 'No'}"
         bot.send_photo(message.chat.id, user['photo'], caption=msg, parse_mode="Markdown")
     else:
-        bot.send_message(message.chat.id, "What is your Name?")
-        bot.register_next_step_handler(message, process_name)
+        bot.send_message(message.chat.id, "Welcome! What is your Name?")
+        bot.register_next_step_handler(message, get_name)
 
-def process_name(message):
-    bot.send_message(message.chat.id, "Select Gender:", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True).add("Male", "Female"))
-    bot.register_next_step_handler(message, process_gender, message.text)
+def get_name(message):
+    name = message.text
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True).add("Male", "Female")
+    bot.send_message(message.chat.id, "Select Gender:", reply_markup=markup)
+    bot.register_next_step_handler(message, get_gender, name)
 
-def process_gender(message, name):
-    bot.send_message(message.chat.id, "Age?")
-    bot.register_next_step_handler(message, process_age, name, message.text)
+def get_gender(message, name):
+    gender = message.text
+    bot.send_message(message.chat.id, "How old are you?")
+    bot.register_next_step_handler(message, get_age, name, gender)
 
-def process_age(message, name, gender):
-    bot.send_message(message.chat.id, "City/Location?")
-    bot.register_next_step_handler(message, process_location, name, gender, message.text)
+def get_age(message, name, gender):
+    age = message.text
+    bot.send_message(message.chat.id, "Which city/location are you in?")
+    bot.register_next_step_handler(message, get_photo, name, gender, age)
 
-def process_location(message, name, gender, age):
-    bot.send_message(message.chat.id, "Send your Photo (ONLY PHOTO allowed):")
-    bot.register_next_step_handler(message, process_photo_final, name, gender, age, message.text)
+def get_photo(message, name, gender, age):
+    location = message.text
+    bot.send_message(message.chat.id, "📸 Send your PHOTO (No Videos/GIFs/Stickers allowed):")
+    bot.register_next_step_handler(message, save_profile, name, gender, age, location)
 
-def process_photo_final(message, name, gender, age, location):
-    # Strict Media Filtering
+def save_profile(message, name, gender, age, location):
     if message.content_type == 'photo':
         photo_id = message.photo[-1].file_id
         users_col.update_one(
-            {"id": message.chat.id},
-            {"$set": {"id": message.chat.id, "name": name, "gender": gender, "age": age, "location": location, "photo": photo_id, "is_premium": 0}},
+            {"id": message.chat.id}, 
+            {"$set": {"id": message.chat.id, "name": name, "gender": gender, "age": age, "location": location, "photo": photo_id, "is_premium": 0}}, 
             upsert=True
         )
-        bot.send_message(message.chat.id, "✅ Profile Saved!")
-        show_main_menu(message)
+        bot.send_message(message.chat.id, "✅ Profile successfully created!")
+        show_menu(message)
     else:
-        bot.send_message(message.chat.id, "🚫 ERROR: Only Photos are allowed! No Videos, GIFs, or Stickers.")
-        bot.register_next_step_handler(message, process_photo_final, name, gender, age, location)
+        bot.send_message(message.chat.id, "🚫 ERROR: Only photos are allowed. Please send a photo:")
+        bot.register_next_step_handler(message, save_profile, name, gender, age, location)
 
-# --- Matching with Reaction Buttons ---
-@bot.message_handler(func=lambda m: m.text in ["🔍 Find Matches", "🎲 Random Match"])
-def handle_matching(message):
-    user_id = message.chat.id
-    if not is_subscribed(user_id):
-        start(message)
-        return
-    user_data = users_col.find_one({"id": user_id})
-    if not user_data:
-        bot.send_message(user_id, "Create a profile first!")
+# --- Find Matches with Reactions & 10 Search Limit ---
+@bot.message_handler(func=lambda m: m.text == "🔍 Find Matches")
+def find_matches(message):
+    uid = message.chat.id
+    user = users_col.find_one({"id": uid})
+    if not user:
+        bot.send_message(uid, "Please create a profile first!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add("Create Profile"))
         return
 
-    is_premium = user_data.get('is_premium', 0)
+    is_premium = user.get('is_premium', 0)
     if not is_premium:
-        user_search_data[user_id] = user_search_data.get(user_id, 0) + 1
-        if user_search_data[user_id] > 10:
-            bot.send_message(user_id, "🚫 Free Limit Reached! Buy Premium for unlimited access.")
+        user_search_data[uid] = user_search_data.get(uid, 0) + 1
+        if user_search_data[uid] > 10:
+            bot.send_message(uid, "🚫 Free Limit Reached! Upgrade to 🌟 Premium for unlimited searches.", 
+                             reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add("🌟 Buy Premium"))
             return
 
-    target = "Female" if user_data.get('gender') == "Male" else "Male"
-    matches = list(users_col.find({"id": {"$ne": user_id}, "gender": target}))
+    target = "Female" if user.get('gender') == "Male" else "Male"
+    matches = list(users_col.find({"id": {"$ne": uid}, "gender": target}))
     if matches:
-        row = random.choice(matches)
+        match = random.choice(matches)
         markup = types.InlineKeyboardMarkup(row_width=3)
-        # Added Like, Thumb and Heart-Eyes buttons
         markup.add(
-            types.InlineKeyboardButton("❤️", callback_data=f"react_love_{row['id']}"),
-            types.InlineKeyboardButton("👍", callback_data=f"react_like_{row['id']}"),
-            types.InlineKeyboardButton("😍", callback_data=f"react_wow_{row['id']}")
+            types.InlineKeyboardButton("❤️", callback_data="rx"),
+            types.InlineKeyboardButton("👍", callback_data="rx"),
+            types.InlineKeyboardButton("😍", callback_data="rx")
         )
-        markup.add(types.InlineKeyboardButton("💬 Send Message", url=f"tg://user?id={row['id']}"))
-        bot.send_photo(user_id, row['photo'], caption=f"Name: {row['name']}\nAge: {row['age']}\nLoc: {row['location']}", reply_markup=markup)
+        markup.add(types.InlineKeyboardButton("💬 Send Message", url=f"tg://user?id={match['id']}"))
+        
+        caption = f"Name: {match['name']}\nAge: {match['age']}\nLoc: {match['location']}"
+        if not is_premium:
+            caption += f"\n\n(Free matches left: {10 - user_search_data[uid]})"
+            
+        bot.send_photo(uid, match['photo'], caption=caption, reply_markup=markup)
     else:
-        bot.send_message(user_id, "No matches found.")
+        bot.send_message(uid, "No matches found right now. Try again later!")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("react_"))
-def handle_reactions(call):
+@bot.callback_query_handler(func=lambda c: c.data == "rx")
+def react_callback(call):
     bot.answer_callback_query(call.id, "Reaction Sent! ✨")
 
-# --- Premium, Stats, Support & Menu ---
-@bot.message_handler(func=lambda m: m.text == "🌟 Buy Premium")
-def premium_plans(message):
-    markup = types.InlineKeyboardMarkup().add(
-        types.InlineKeyboardButton("Weekly - $2", callback_data="buy_2"),
-        types.InlineKeyboardButton("Monthly - $7", callback_data="buy_7"),
-        types.InlineKeyboardButton("Yearly - $25", callback_data="buy_25")
-    )
-    bot.send_message(message.chat.id, "💎 Upgrade to Premium:", reply_markup=markup)
+# --- Menu & Premium ---
+def show_menu(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add("🔍 Find Matches", "👤 My Profile").add("🌟 Buy Premium", "📊 Stats")
+    bot.send_message(message.chat.id, "Main Menu:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
-def process_buy(call):
+@bot.message_handler(func=lambda m: m.text == "📊 Stats")
+def stats(message):
+    count = users_col.count_documents({})
+    bot.reply_to(message, f"📊 Total Active Users: {count}")
+
+@bot.message_handler(func=lambda m: m.text == "🌟 Buy Premium")
+def buy_prem(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Weekly - $2", callback_data="pay_2"))
+    markup.add(types.InlineKeyboardButton("Monthly - $7", callback_data="pay_7"))
+    markup.add(types.InlineKeyboardButton("Yearly - $200", callback_data="pay_200")) # FIXED: $200
+    bot.send_message(message.chat.id, "💎 UNLOCK UNLIMITED ACCESS:\n\n✅ Unlimited Matches\n✅ Yearly Exclusive Access\n✅ Ad-free Experience", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pay_"))
+def process_payment(call):
     amount = call.data.split("_")[1]
     invoice = create_invoice(amount, call.message.chat.id)
     if invoice:
         markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Pay via CryptoBot", url=invoice['pay_url']))
-        bot.send_message(call.message.chat.id, f"✅ Pay ${amount} USDT:", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == "📊 Stats")
-def show_stats(message):
-    bot.reply_to(message, f"📊 Total Active Users: {users_col.count_documents({})}")
-
-@bot.message_handler(func=lambda m: m.text == "🛠 Support")
-def support_info(message):
-    bot.send_message(message.chat.id, f"Contact Admin: {SUPPORT_USER}")
-
-def show_main_menu(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add("🔍 Find Matches", "🎲 Random Match").add("👤 My Profile", "🌟 Buy Premium").add("📊 Stats", "🛠 Support")
-    bot.send_message(message.chat.id, "🌟 Main Menu:", reply_markup=markup)
+        bot.send_message(call.message.chat.id, f"✅ To upgrade, pay ${amount} USDT using the button below:", reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    if is_subscribed(message.chat.id): show_main_menu(message)
-    else:
-        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Join Channel", url=CHANNEL_LINK)).add(types.InlineKeyboardButton("Joined ✅", callback_data="check_sub"))
-        bot.send_message(message.chat.id, "Join our channel to continue.", reply_markup=markup)
+    show_menu(message)
 
-@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
-def check_sub(call):
-    if is_subscribed(call.message.chat.id): show_main_menu(call.message)
-    else: bot.answer_callback_query(call.id, "❌ Join first!", show_alert=True)
-
+# --- Start Bot ---
+print("Bot is starting...")
 threading.Thread(target=check_payments, daemon=True).start()
 bot.infinity_polling()
